@@ -2,22 +2,27 @@
 
 const _ = require('lodash');
 
-const RNFatchBlob = require('react-native-fetch-blob').default;
+const RNFetchBlob = require('react-native-fetch-blob').default;
 
 const {
     fs
-} = RNFatchBlob;
+} = RNFetchBlob;
 
-const baseCacheDir = fs.dirs.CacheDir + '/imagesCacheDir';
+const LOCATION = {
+    CACHE: fs.dirs.CacheDir + '/imagesCacheDir',
+    BUNDLE: fs.dirs.MainBundleDir + '/imagesCacheDir'
+};
 
 const SHA1 = require("crypto-js/sha1");
 const URL = require('url-parse');
 
 const defaultHeaders = {};
+const defaultImageTypes = ['png', 'jpeg', 'jpg', 'gif', 'bmp', 'tiff', 'tif'];
 const defaultResolveHeaders = _.constant(defaultHeaders);
 
 const defaultOptions = {
-    useQueryParamsInCacheKey: false
+    useQueryParamsInCacheKey: false,
+    cacheLocation: LOCATION.CACHE
 };
 
 const activeDownloads = {};
@@ -50,11 +55,15 @@ function generateCacheKey(url, options) {
     const filePath = pathParts.join('/');
 
     const parts = fileName.split('.');
-    // TODO - try to figure out the file type or let the user provide it, for now use jpg as default
-    const type = parts.length > 1 ? parts.pop() : 'jpg';
+    const fileType = parts.length > 1 ? _.toLower(parts.pop()) : '';
+    const type = defaultImageTypes.includes(fileType) ? fileType : 'jpg';
 
     const cacheable = filePath + fileName + type + getQueryForCacheKey(parsedUrl, options.useQueryParamsInCacheKey);
     return SHA1(cacheable) + '.' + type;
+}
+
+function getBaseDir(cacheLocation) {
+    return cacheLocation || LOCATION.CACHE;
 }
 
 function getCachePath(url, options) {
@@ -71,7 +80,7 @@ function getCachedImageFilePath(url, options) {
     const cachePath = getCachePath(url, options);
     const cacheKey = generateCacheKey(url, options);
 
-    return `${baseCacheDir}/${cachePath}/${cacheKey}`;
+    return `${getBaseDir(options.cacheLocation)}/${cachePath}/${cacheKey}`;
 }
 
 function deleteFile(filePath) {
@@ -89,9 +98,16 @@ function getDirPath(filePath) {
 
 function ensurePath(dirPath) {
     return fs.isDir(dirPath)
-        .then(exists =>
-            !exists && fs.mkdir(dirPath)
-        )
+        .then(isDir => {
+            if (!isDir) {
+                return fs.mkdir(dirPath)
+                    .then(() => fs.exists(dirPath).then(exists => {
+                        // Check if dir has indeed been created because
+                        // there's no exception on incorrect user-defined paths (?)...
+                        if (!exists) throw new Error('Invalid cacheLocation');
+                    }))
+            }
+        })
         .catch(err => {
             // swallow folder already exists errors
             if (err.message.includes('folder already exists')) {
@@ -114,19 +130,23 @@ function ensurePath(dirPath) {
 function downloadImage(fromUrl, toFile, headers = {}) {
     // use toFile as the key as is was created using the cacheKey
     if (!_.has(activeDownloads, toFile)) {
+        //Using a temporary file, if the download is accidentally interrupted, it will not produce a disabled file
+        const tmpFile = toFile + '.tmp';
         // create an active download for this file
         activeDownloads[toFile] = new Promise((resolve, reject) => {
-            RNFatchBlob
-                .config({path: toFile})
+            RNFetchBlob
+                .config({path: tmpFile})
                 .fetch('GET', fromUrl, headers)
                 .then(res => {
                     if (Math.floor(res.respInfo.status / 100) !== 2) {
                         throw new Error('Failed to successfully download image');
                     }
-                    resolve(toFile);
+                    //The download is complete and rename the temporary file
+                    return fs.mv(tmpFile, toFile);
                 })
+                .then(() => resolve(toFile))
                 .catch(err => {
-                    return deleteFile(toFile)
+                    return deleteFile(tmpFile)
                         .then(() => reject(err));
                 })
                 .finally(() => {
@@ -299,23 +319,25 @@ function seedCache(local, url, options = defaultOptions) {
 
 /**
  * Clear the entire cache.
+ * @param options
  * @returns {Promise}
  */
-function clearCache() {
-    return fs.unlink(baseCacheDir)
+function clearCache(options = defaultOptions) {
+    return fs.unlink(getBaseDir(options.cacheLocation))
         .catch(() => {
             // swallow exceptions if path doesn't exist
         })
-        .then(() => ensurePath(baseCacheDir));
+        .then(() => ensurePath(getBaseDir(options.cacheLocation)));
 }
 
 /**
  * Return info about the cache, list of files and the total size of the cache.
+ * @param options
  * @returns {Promise.<{size}>}
  */
-function getCacheInfo() {
-    return ensurePath(baseCacheDir)
-        .then(() => collectFilesInfo(baseCacheDir))
+function getCacheInfo(options = defaultOptions) {
+    return ensurePath(getBaseDir(options.cacheLocation))
+        .then(() => collectFilesInfo(getBaseDir(options.cacheLocation)))
         .then(cache => {
             const files = _.flattenDeep(cache);
             const size = _.sumBy(files, 'size');
@@ -328,6 +350,7 @@ function getCacheInfo() {
 
 module.exports = {
     isCacheable,
+    getCachedImageFilePath,
     getCachedImagePath,
     cacheImage,
     deleteCachedImage,
@@ -335,5 +358,6 @@ module.exports = {
     deleteMultipleCachedImages,
     clearCache,
     seedCache,
-    getCacheInfo
+    getCacheInfo,
+    LOCATION
 };
